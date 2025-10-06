@@ -8,3 +8,4 @@ httpx==0.26.0
 python-multipart==0.0.6
 pyinstaller==6.3.0
 supabase
+dotenv
