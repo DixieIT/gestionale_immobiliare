@@ -1,2 +1,23 @@
+# Environment variables
 .env
+
+# Virtual environment
 massimo_db/
+
+# Python cache
+__pycache__/
+
+
+# Data folders
+data/
+
+# Logs / cache
+*.log
+*.tmp
+.cache/
+.ipynb_checkpoints/
+
+# IDE / OS stuff
+.vscode/
+.DS_Store
+desktop.ini
