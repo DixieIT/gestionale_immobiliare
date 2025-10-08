@@ -3,6 +3,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from PIL import Image
 import shutil
+from uuid import uuid4
+import tempfile
 
 try:
     from . import settings
@@ -101,7 +103,7 @@ def render_sidebar():
         if st.sidebar.button(
             f"{prop.get('nome')}\n{affitto_info}{warning}",
             key=f"prop_{prop.get('id')}",
-            use_container_width=True
+            width="stretch"
         ):
             st.session_state.selected_prop_id = int(prop['id'])
             st.session_state.edit_mode = None
@@ -120,9 +122,16 @@ def render_scheda_immobile(prop_id: int):
 
     with col1:
         # Immagine
-        img_path = settings.IMAGES_DIR / prop['immagine_path'] if prop.get('immagine_path') else None
-        if img_path and img_path.exists():
-            st.image(str(img_path), use_container_width=True)
+        img_url = prop.get('immagine_url')
+        if not img_url and prop.get('immagine_path'):
+            # se il bucket è privato, ottieni una signed URL
+            try:
+                img_url = db.get_signed_piantina_url(prop['id'], expires_seconds=3600)
+            except Exception:
+                img_url = None
+        
+        if img_url:
+            st.image(img_url, width="stretch")
         else:
             st.info("📷 Nessuna immagine")
 
@@ -186,12 +195,12 @@ def render_scheda_immobile(prop_id: int):
     col_edit, col_del, col_pdf = st.columns([1, 1, 2])
 
     with col_edit:
-        if st.button("✏️ Modifica", use_container_width=True):
+        if st.button("✏️ Modifica", width="stretch"):
             st.session_state.edit_mode = prop_id
             st.rerun()
 
     with col_del:
-        if st.button("🗑️ Elimina", use_container_width=True, type="secondary"):
+        if st.button("🗑️ Elimina", width="stretch", type="secondary"):
             if st.session_state.get('confirm_delete') == prop_id:
                 db.delete_proprieta(prop_id)
                 st.session_state.selected_prop_id = None
@@ -253,7 +262,7 @@ def render_form_proprieta(prop_id: int = None):
                 subalterno = st.number_input("Subalterno", min_value=0.0, value=float(prop.get('subalterno') or 0.0))
                 classe = st.text_input("Classe", value=prop.get('classe', '') or '')
 
-        submitted = st.form_submit_button("💾 Salva", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("💾 Salva", type="primary", width="stretch")
 
         if submitted:
             # Validazioni
@@ -264,16 +273,6 @@ def render_form_proprieta(prop_id: int = None):
             if mq_comm < mq_eff:
                 st.error("❌ MQ Commerciali devono essere >= MQ Effettivi")
                 return
-
-            # Gestione immagine
-            immagine_path = prop.get('immagine_path')
-            if immagine:
-                ext = Path(immagine.name).suffix
-                filename = f"{nome.lower().replace(' ', '_')}_{datetime.now().timestamp()}{ext}"
-                img_path = settings.IMAGES_DIR / filename
-                with open(img_path, 'wb') as f:
-                    f.write(immagine.getbuffer())
-                immagine_path = filename
 
             # Prepara dati
             data = {
@@ -287,7 +286,6 @@ def render_form_proprieta(prop_id: int = None):
                 'contratto_inizio': contratto_inizio.isoformat() if contratto_inizio else None,
                 'contratto_fine': contratto_fine.isoformat() if contratto_fine else None,
                 'mensilita_pagata': 1 if mensilita_pagata else 0,
-                'immagine_path': immagine_path,
                 'foglio': foglio if foglio > 0 else None,
                 'particella': particella if particella > 0 else None,
                 'subalterno': subalterno if subalterno > 0 else None,
@@ -298,11 +296,51 @@ def render_form_proprieta(prop_id: int = None):
 
             try:
                 if prop_id:
+                    # aggiorna i dati testuali
                     db.update_proprieta(prop_id, data)
+
+                    # se c'è un file immagine, caricalo ORA sul bucket e collega
+                    if immagine:
+                        ext = Path(immagine.name).suffix.lower()
+                        safe_base = nome.lower().replace(" ", "_")
+                        filename = f"{safe_base}_{int(datetime.now().timestamp())}{ext}"
+
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                            tmp.write(immagine.getbuffer())
+                            tmp_path = tmp.name
+
+                        db.upload_piantina_and_link(
+                            prop_id=prop_id,
+                            local_file_path=tmp_path,
+                            filename=filename,
+                            make_public_url=True   # se bucket pubblico
+                        )
+                        Path(tmp_path).unlink(missing_ok=True)
+
                     st.success("✅ Proprietà aggiornata!")
                     st.session_state.edit_mode = None
                 else:
+                    # 1) crea la riga base senza immagine
                     new_id = db.create_proprieta(data)
+
+                    # 2) se l'utente ha caricato un file, caricalo su Storage e collega al record
+                    if immagine:
+                        ext = Path(immagine.name).suffix.lower()
+                        safe_base = nome.lower().replace(" ", "_")
+                        filename = f"{safe_base}_{int(datetime.now().timestamp())}{ext}"
+
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                            tmp.write(immagine.getbuffer())
+                            tmp_path = tmp.name
+
+                        db.upload_piantina_and_link(
+                            prop_id=new_id,
+                            local_file_path=tmp_path,
+                            filename=filename,
+                            make_public_url=True   # True se il bucket "piantina" è pubblico
+                        )
+                        Path(tmp_path).unlink(missing_ok=True)
+
                     st.success(f"✅ Proprietà creata! (ID: {new_id})")
                     st.session_state.selected_prop_id = new_id
 
@@ -310,20 +348,19 @@ def render_form_proprieta(prop_id: int = None):
             except Exception as e:
                 st.error(f"❌ Errore: {str(e)}")
 
-
 def render_azioni_globali():
     """Azioni Import/Export/Sync"""
     st.sidebar.markdown("---")
     st.sidebar.subheader("📊 Azioni Globali")
 
     # Nuovo immobile
-    if st.sidebar.button("➕ Nuovo Immobile", use_container_width=True, type="primary"):
+    if st.sidebar.button("➕ Nuovo Immobile", width="stretch", type="primary"):
         st.session_state.edit_mode = 0
         st.session_state.selected_prop_id = None
         st.rerun()
 
     # Export Excel
-    if st.sidebar.button("📤 Export Excel", use_container_width=True):
+    if st.sidebar.button("📤 Export Excel", width="stretch"):
         try:
             export_path = settings.DATA_DIR / f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             excel_io.export_to_excel(export_path)
