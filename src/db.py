@@ -6,7 +6,7 @@ import os, re, uuid, pathlib
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-# Per upload lato server, meglio la SERVICE_ROLE_KEY (ha permessi su Storage con RLS attive)
+# Server-side: prefer SERVICE_ROLE_KEY (permessi completi con RLS/Storage)
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -14,22 +14,57 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Configura questi nomi per il tuo progetto
-BUCKET_NAME = "piantine" 
-IMG_URL_COL = "immagine_url"
+# --- Storage config -----------------------------------------------------------
+PIANTINE_BUCKET = "piantine"
+IMG_URL_COL  = "immagine_url"
 IMG_PATH_COL = "immagine_path"
 
+CONTRACT_BUCKET   = "contratti"
+CONTRACT_URL_COL  = "contratto_url"
+CONTRACT_PATH_COL = "contratto_path"
+
+
+# --- Helpers -----------------------------------------------------------------
 def _safe_filename(name: str) -> str:
     name = name.strip().lower()
     name = re.sub(r"[^a-z0-9._-]+", "-", name)
     name = re.sub(r"-+", "-", name).strip("-")
     return name or str(uuid.uuid4())
 
+def _as_public_url(res) -> Optional[str]:
+    """Normalize get_public_url(...) return value across supabase-py versions."""
+    if isinstance(res, str):
+        return res
+    if isinstance(res, dict):
+        # supabase-py v2 often: {'data': {'publicUrl': '...'}}
+        return (
+            res.get("publicUrl")
+            or (res.get("data") or {}).get("publicUrl")
+            or (res.get("data") or {}).get("publicURL")
+        )
+    return None
+
+def _as_signed_url(res) -> Optional[str]:
+    """Normalize create_signed_url(...) return value across supabase-py versions."""
+    if isinstance(res, str):
+        return res
+    if isinstance(res, dict):
+        # keys seen in the wild: signedURL / signedUrl, sometimes under data
+        return (
+            res.get("signedURL")
+            or res.get("signedUrl")
+            or (res.get("data") or {}).get("signedURL")
+            or (res.get("data") or {}).get("signedUrl")
+        )
+    return None
+
+
+# --- DB Manager --------------------------------------------------------------
 class DatabaseManager:
     def __init__(self):
         self.table = supabase.table("proprieta")
 
-    # --- CRUD esistenti -------------------------------------------------------
+    # CRUD
     def create_proprieta(self, data: Dict[str, Any]) -> Optional[int]:
         if "mensilita_pagata" in data and isinstance(data["mensilita_pagata"], int):
             data["mensilita_pagata"] = bool(data["mensilita_pagata"])
@@ -54,7 +89,9 @@ class DatabaseManager:
 
     def get_proprieta_by_id(self, prop_id: int) -> Optional[Dict[str, Any]]:
         resp = self.table.select("*").eq("id", prop_id).limit(1).execute()
-        return resp.data[0] if resp.data else None
+        item = resp.data[0] if resp.data else None
+        # Ensure a dict (avoid 'str has no attribute get' in the UI)
+        return item if isinstance(item, dict) else None
 
     def update_proprieta(self, prop_id: int, data: Dict[str, Any]) -> bool:
         if "mensilita_pagata" in data and isinstance(data["mensilita_pagata"], int):
@@ -66,7 +103,7 @@ class DatabaseManager:
         resp = self.table.delete().eq("id", prop_id).execute()
         return bool(resp.data)
 
-
+    # --- PIANTINE (images) ---------------------------------------------------
     def upload_piantina_and_link(
         self,
         prop_id: int,
@@ -74,68 +111,55 @@ class DatabaseManager:
         *,
         filename: Optional[str] = None,
         make_public_url: bool = True,
-        upsert: bool = True,
     ) -> Dict[str, Any]:
         """
-        Carica una piantina nel bucket e aggiorna il record della proprieta' con:
-          - URL pubblico (se make_public_url=True)
-          - path nel bucket (sempre, nella colonna IMG_PATH_COL se esiste)
-        Ritorna dizionario con {path, public_url (se richiesto)}.
+        Upload image to 'piantine/<prop_id>/<filename>' and update DB with URL+path.
         """
-        # 1) prepara path remoto: <prop_id>/<filename-sicuro>
         filename = filename or pathlib.Path(local_file_path).name
         safe_name = _safe_filename(filename)
         remote_path = f"{prop_id}/{safe_name}"
 
-        # 2) upload nel bucket
+        # Upload (avoid options with bools)
         with open(local_file_path, "rb") as f:
-            # upsert=True evita errore se ricarichi con lo stesso nome
-            supabase.storage.from_(BUCKET_NAME).upload(remote_path, f)
+            supabase.storage.from_(PIANTINE_BUCKET).upload(remote_path, f)
 
-        # 3) ottieni URL (pubblico o firmato)
         public_url = None
         if make_public_url:
-            res = supabase.storage.from_(BUCKET_NAME).get_public_url(remote_path)
-            public_url = res.get("data", {}).get("publicUrl")
+            res = supabase.storage.from_(PIANTINE_BUCKET).get_public_url(remote_path)
+            public_url = _as_public_url(res)
 
-        # 4) aggiorna record tabella
-        update_payload: Dict[str, Any] = {}
+        payload: Dict[str, Any] = {}
         if IMG_URL_COL:
-            update_payload[IMG_URL_COL] = public_url or None
+            payload[IMG_URL_COL] = public_url or None
         if IMG_PATH_COL:
-            update_payload[IMG_PATH_COL] = remote_path
+            payload[IMG_PATH_COL] = remote_path
 
-        if update_payload:
-            self.update_proprieta(prop_id, update_payload)
+        if payload:
+            self.update_proprieta(prop_id, payload)
 
         return {"path": remote_path, "public_url": public_url}
 
     def get_signed_piantina_url(self, prop_id: int, expires_seconds: int = 3600) -> Optional[str]:
         """
-        Se il bucket e' privato, usa il PATH salvato per generare una Signed URL temporanea.
+        Return signed URL for a private image if path is stored.
         """
         rec = self.get_proprieta_by_id(prop_id)
         if not rec:
             return None
-
         path = rec.get(IMG_PATH_COL) or ""
         if not path:
             return None
 
-        data = supabase.storage.from_(BUCKET_NAME).create_signed_url(path, expires_seconds)
-        return data.get("signedUrl")
+        res = supabase.storage.from_(PIANTINE_BUCKET).create_signed_url(path, expires_seconds)
+        return _as_signed_url(res)
 
     def remove_piantina(self, prop_id: int) -> bool:
-        """
-        Cancella la piantina dal bucket (usando il PATH salvato) e azzera i campi nel DB.
-        """
         rec = self.get_proprieta_by_id(prop_id)
         if not rec:
             return False
-
         path = rec.get(IMG_PATH_COL)
         if path:
-            supabase.storage.from_(BUCKET_NAME).remove([path])
+            supabase.storage.from_(PIANTINE_BUCKET).remove([path])
 
         payload = {}
         if IMG_URL_COL:
@@ -143,6 +167,60 @@ class DatabaseManager:
         if IMG_PATH_COL:
             payload[IMG_PATH_COL] = None
         return self.update_proprieta(prop_id, payload)
+
+    # --- CONTRATTI (PDFs) ----------------------------------------------------
+    def upload_contratto_and_link(
+        self,
+        prop_id: int,
+        local_file_path: str,
+        *,
+        filename: Optional[str] = None,
+        make_public_url: bool = True,
+    ) -> Dict[str, Any]:
+        filename = filename or pathlib.Path(local_file_path).name
+        safe_name = _safe_filename(filename)
+        remote_path = f"{prop_id}/{safe_name}"
+
+        # Upload with correct content type from the start
+        with open(local_file_path, "rb") as f:
+            supabase.storage.from_(CONTRACT_BUCKET).upload(
+                remote_path,
+                f,
+                file_options={
+                    "contentType": "application/pdf",
+                    "content-type": "application/pdf",
+                }
+            )
+
+        # Save a clean public URL (no trailing '?')
+        public_url = None
+        if make_public_url:
+            public_url = f"{SUPABASE_URL}/storage/v1/object/public/{CONTRACT_BUCKET}/{remote_path}"
+
+        self.update_proprieta(
+            prop_id,
+            {
+                CONTRACT_PATH_COL: remote_path,
+                CONTRACT_URL_COL: public_url,
+            },
+        )
+        return {"path": remote_path, "public_url": public_url}
+
+
+    def get_signed_contratto_url(self, prop_id: int, expires_seconds: int = 3600) -> Optional[str]:
+        """
+        Return signed URL for a private contract if path is stored.
+        """
+        rec = self.get_proprieta_by_id(prop_id)
+        if not rec:
+            return None
+        path = rec.get(CONTRACT_PATH_COL)
+        if not path:
+            return None
+
+        res = supabase.storage.from_(CONTRACT_BUCKET).create_signed_url(path, expires_seconds)
+        return _as_signed_url(res)
+
 
 # istanza globale
 db = DatabaseManager()
