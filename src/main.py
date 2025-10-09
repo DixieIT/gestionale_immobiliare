@@ -70,7 +70,7 @@ def render_sidebar():
         affitto_info = f"{badge} {prop.get('affitto_mensile', 0):.0f}€" if prop.get("affittato_a") else "⚪ Libero"
         warning = f" ⚠️ {giorni_scadenza}gg" if 0 < giorni_scadenza < 60 else ""
 
-        if st.sidebar.button(f"{prop.get('nome')}\n{affitto_info}{warning}", key=f"prop_{prop.get('id')}", width="stretch"):
+        if st.sidebar.button(f"{prop.get('nome')}\n{affitto_info}{warning}", key=f"prop_{prop.get('id')}", use_container_width=True):
             st.session_state.selected_prop_id = int(prop["id"])
             st.session_state.edit_mode = None
             st.session_state.confirm_delete = None
@@ -93,7 +93,7 @@ def render_scheda_immobile(prop_id: int):
                 img_url = None
 
         if img_url:
-            st.image(img_url, width="stretch")
+            st.image(img_url, use_column_width=True)
         else:
             st.info("📷 Nessuna immagine")
 
@@ -151,7 +151,7 @@ def render_scheda_immobile(prop_id: int):
             contratto_url = None
 
     if contratto_url:
-        st.link_button("📄 Apri PDF", contratto_url, width="stretch")
+        st.link_button("📄 Apri PDF", contratto_url, use_container_width=True)
     else:
         st.info("Nessun contratto caricato")
 
@@ -159,11 +159,11 @@ def render_scheda_immobile(prop_id: int):
 
     col_edit, col_del, _ = st.columns([1, 1, 2])
     with col_edit:
-        if st.button("✏️ Modifica", width="stretch"):
+        if st.button("✏️ Modifica", use_container_width=True):
             st.session_state.edit_mode = prop_id
             st.rerun()
     with col_del:
-        if st.button("🗑️ Elimina", width="stretch", type="secondary"):
+        if st.button("🗑️ Elimina", use_container_width=True, type="secondary"):
             if st.session_state.get("confirm_delete") == prop_id:
                 db.delete_proprieta(prop_id)
                 st.session_state.selected_prop_id = None
@@ -209,7 +209,7 @@ def render_form_proprieta(prop_id: int = None):
             classe = r1c3.text_input("Classe", value=prop.get("classe", ""))
             quota = st.text_input("Quota", value=prop.get("quota", ""))
 
-        submitted = st.form_submit_button("💾 Salva", type="primary", width="stretch")
+        submitted = st.form_submit_button("💾 Salva", type="primary", use_container_width=True)
 
         if submitted:
             if not nome or not indirizzo:
@@ -266,12 +266,12 @@ def render_azioni_globali():
     st.sidebar.markdown("---")
     st.sidebar.subheader("📊 Azioni Globali")
 
-    if st.sidebar.button("➕ Nuovo Immobile", width="stretch", type="primary"):
+    if st.sidebar.button("➕ Nuovo Immobile", use_container_width=True, type="primary"):
         st.session_state.edit_mode = 0
         st.session_state.selected_prop_id = None
         st.rerun()
 
-    if st.sidebar.button("📤 Export Excel", width="stretch"):
+    if st.sidebar.button("📤 Export Excel", use_container_width=True):
         try:
             export_path = settings.DATA_DIR / f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             excel_io.export_to_excel(export_path)
