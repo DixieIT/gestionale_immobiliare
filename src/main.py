@@ -93,7 +93,7 @@ def render_scheda_immobile(prop_id: int):
                 img_url = None
 
         if img_url:
-            st.image(img_url, use_column_width=True)
+            st.image(img_url, use_container_width=True)
         else:
             st.info("📷 Nessuna immagine")
 
